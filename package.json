@@ -1,0 +1,35 @@
+{
+  "name": "balancevault",
+  "version": "1.0.0",
+  "description": "BalanceVault — Money movement with a ledger you can prove",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "install:all": "npm install --prefix backend && npm install --prefix frontend",
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "dev": "concurrently -n \"BACKEND,FRONTEND\" -c \"blue,green\" \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
+    "build": "npm run build --prefix backend && npm run build --prefix frontend",
+    "test": "npm run test --prefix backend",
+    "db:generate": "npm run db:generate --prefix backend",
+    "db:migrate": "npm run db:migrate --prefix backend",
+    "db:seed": "npm run db:seed --prefix backend",
+    "start": "npm run start --prefix backend"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "keywords": [
+    "fintech",
+    "double-entry",
+    "ledger",
+    "security",
+    "auditability",
+    "snovasys"
+  ],
+  "author": "Venkat (venkatch2905)",
+  "license": "MIT"
+}

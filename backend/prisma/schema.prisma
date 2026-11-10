@@ -1,0 +1,131 @@
+// Prisma schema for BalanceVault
+// Double-entry accounting system with cryptographic audit chain
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                    String        @id @default(uuid())
+  email                 String        @unique
+  passwordHash          String
+  fullName              String
+  phone                 String?
+  role                  String        @default("USER") // USER, ADMIN, AUDITOR
+  status                String        @default("ACTIVE") // PENDING_VERIFICATION, ACTIVE, SUSPENDED
+  tokenVersion          Int           @default(0) // Incremented for immediate session revocation
+  kycStatus             String        @default("UNSUBMITTED") // UNSUBMITTED, PENDING, APPROVED, REJECTED
+  kycDocumentType       String?
+  kycDocumentNumber     String?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  accounts              Account[]
+  initiatedTransactions Transaction[] @relation("InitiatedTransactions")
+  auditLogs             AuditLog[]
+
+  @@index([email])
+  @@index([role])
+  @@index([status])
+}
+
+model Account {
+  id                    String        @id @default(uuid())
+  accountNumber         String        @unique
+  userId                String
+  user                  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type                  String        @default("CHECKING") // CHECKING, SAVINGS, SYSTEM_VAULT
+  currency              String        @default("USD")
+  cachedBalance         Int           @default(0) // In cents to eliminate floating point issues (e.g. 10000 = $100.00)
+  status                String        @default("ACTIVE") // ACTIVE, FROZEN, CLOSED
+  version               Int           @default(0) // Optimistic concurrency lock
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  ledgerEntries         LedgerEntry[]
+  outgoingTransfers     Transaction[] @relation("FromAccount")
+  incomingTransfers     Transaction[] @relation("ToAccount")
+
+  @@index([userId])
+  @@index([accountNumber])
+  @@index([status])
+}
+
+model Transaction {
+  id                    String        @id @default(uuid())
+  reference             String        @unique
+  type                  String        // DEPOSIT, WITHDRAWAL, TRANSFER, SYSTEM_CREDIT
+  status                String        @default("PENDING") // PENDING, COMPLETED, FAILED, REVERSED
+  description           String
+  amount                Int           // In cents (always positive integer)
+  currency              String        @default("USD")
+  initiatedById         String
+  initiatedBy           User          @relation("InitiatedTransactions", fields: [initiatedById], references: [id])
+  fromAccountId         String?
+  fromAccount           Account?      @relation("FromAccount", fields: [fromAccountId], references: [id])
+  toAccountId           String?
+  toAccount             Account?      @relation("ToAccount", fields: [toAccountId], references: [id])
+  createdAt             DateTime      @default(now())
+
+  entries               LedgerEntry[]
+  block                 LedgerBlock?
+
+  @@index([reference])
+  @@index([initiatedById])
+  @@index([fromAccountId])
+  @@index([toAccountId])
+  @@index([createdAt])
+}
+
+model LedgerEntry {
+  id                    String        @id @default(uuid())
+  transactionId         String
+  transaction           Transaction   @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  accountId             String
+  account               Account       @relation(fields: [accountId], references: [id])
+  entryType             String        // DEBIT, CREDIT
+  amount                Int           // Positive integer in cents
+  balanceAfter          Int           // Running balance in cents immediately after this entry
+  createdAt             DateTime      @default(now())
+
+  @@index([transactionId])
+  @@index([accountId])
+  @@index([createdAt])
+}
+
+model LedgerBlock {
+  id                    String        @id @default(uuid())
+  sequenceNumber        Int           @unique
+  transactionId         String        @unique
+  transaction           Transaction   @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  previousHash          String
+  hash                  String        @unique
+  timestamp             DateTime      @default(now())
+  nonce                 String
+
+  @@index([sequenceNumber])
+  @@index([hash])
+}
+
+model AuditLog {
+  id                    String        @id @default(uuid())
+  actorId               String?
+  actor                 User?         @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actorEmail            String?
+  action                String        // AUTH_LOGIN, TRANSFER, ACCOUNT_FREEZE, IDOR_ATTEMPT, ESCALATION_ATTEMPT
+  severity              String        @default("INFO") // INFO, WARNING, SECURITY_ALERT, CRITICAL
+  ipAddress             String        @default("127.0.0.1")
+  userAgent             String        @default("Unknown")
+  details               String        // JSON string
+  createdAt             DateTime      @default(now())
+
+  @@index([actorId])
+  @@index([action])
+  @@index([severity])
+  @@index([createdAt])
+}

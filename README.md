@@ -63,7 +63,7 @@ BalanceVault requires **Node.js (v18+)** and runs out-of-the-box with **zero ext
 
 ### 1. Clone & Install Dependencies
 ```bash
-git clone https://github.com/venkatch2905/BalanceVault.git
+git clone https://github.com/Venkat-chakrala/BalanceVault.git
 cd BalanceVault
 
 # Install root, backend, and frontend dependencies
@@ -166,3 +166,4 @@ See [`PROMPTS.md`](file:///c:/Users/venka/OneDrive/Desktop/BalanceVault/PROMPTS.
 - **Frontend**: Deployable to Vercel / Netlify / Render Static (`dist/`).
 - **Backend & Database**: Deployable to Render / Railway / Supabase / Neon PostgreSQL.
   - To use PostgreSQL in production, set `DATABASE_URL=postgresql://...` and use `prisma/schema.postgresql.prisma`.
+

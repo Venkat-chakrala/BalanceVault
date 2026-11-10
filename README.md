@@ -163,7 +163,9 @@ See [`PROMPTS.md`](file:///c:/Users/venka/OneDrive/Desktop/BalanceVault/PROMPTS.
 
 ## 🌐 Production Cloud Deployment
 
-- **Frontend**: Deployable to Vercel / Netlify / Render Static (`dist/`).
-- **Backend & Database**: Deployable to Render / Railway / Supabase / Neon PostgreSQL.
-  - To use PostgreSQL in production, set `DATABASE_URL=postgresql://...` and use `prisma/schema.postgresql.prisma`.
+- **Live Deployed Application**: **[https://balancevault-zbie.onrender.com](https://balancevault-zbie.onrender.com)**
+- **API Health Check**: **[https://balancevault-zbie.onrender.com/api/health](https://balancevault-zbie.onrender.com/api/health)**
+- **API Readiness Check**: **[https://balancevault-zbie.onrender.com/api/ready](https://balancevault-zbie.onrender.com/api/ready)**
+- **Frontend & Backend**: Unified deployment serving production React bundle from Express API on Render.
+- **Database**: Self-contained SQLite ledger with automatic double-entry journal balancing and SHA-256 block chain. Full compatibility with PostgreSQL via `prisma/schema.postgresql.prisma`.
 

@@ -7,7 +7,8 @@ export class TransferController {
    */
   static async transfer(req: Request, res: Response, next: NextFunction) {
     try {
-      const { fromAccountId, toAccountId, amount, description } = req.body;
+      const { fromAccountId, toAccountId, amount, description, idempotencyKey } = req.body;
+      const headerIdempotencyKey = req.header('idempotency-key') || undefined;
       const user = req.user!;
 
       const result = await LedgerService.executeTransfer({
@@ -16,6 +17,7 @@ export class TransferController {
         toAccountId,
         amount,
         description,
+        idempotencyKey: idempotencyKey || headerIdempotencyKey,
         ipAddress: req.ip,
         userAgent: req.get('user-agent'),
       });
@@ -35,12 +37,13 @@ export class TransferController {
       });
     } catch (error: any) {
       const isAuthError = error.message.includes('Unauthorized') || error.message.includes('not own');
-      const status = isAuthError ? 403 : error.message.includes('Insufficient') ? 400 : 400;
+      const isDuplicate = error.message.includes('Duplicate transaction');
+      const status = isAuthError ? 403 : isDuplicate ? 409 : 400;
 
       return res.status(status).json({
         success: false,
         error: {
-          code: isAuthError ? 'UNAUTHORIZED' : 'TRANSFER_FAILED',
+          code: isAuthError ? 'UNAUTHORIZED' : isDuplicate ? 'DUPLICATE_TRANSACTION' : 'TRANSFER_FAILED',
           message: error.message,
         },
       });
@@ -52,7 +55,8 @@ export class TransferController {
    */
   static async deposit(req: Request, res: Response, next: NextFunction) {
     try {
-      const { accountId, amount, description } = req.body;
+      const { accountId, amount, description, idempotencyKey } = req.body;
+      const headerIdempotencyKey = req.header('idempotency-key') || undefined;
       const user = req.user!;
 
       const result = await LedgerService.executeDeposit({
@@ -60,6 +64,7 @@ export class TransferController {
         accountId,
         amount,
         description,
+        idempotencyKey: idempotencyKey || headerIdempotencyKey,
         ipAddress: req.ip,
         userAgent: req.get('user-agent'),
       });
@@ -76,9 +81,15 @@ export class TransferController {
         },
       });
     } catch (error: any) {
-      return res.status(400).json({
+      const isAuthError = error.message.includes('Unauthorized') || error.message.includes('not own');
+      const isDuplicate = error.message.includes('Duplicate transaction');
+      const status = isAuthError ? 403 : isDuplicate ? 409 : 400;
+      return res.status(status).json({
         success: false,
-        error: { code: 'DEPOSIT_FAILED', message: error.message },
+        error: {
+          code: isAuthError ? 'UNAUTHORIZED' : isDuplicate ? 'DUPLICATE_TRANSACTION' : 'DEPOSIT_FAILED',
+          message: error.message,
+        },
       });
     }
   }
@@ -89,17 +100,19 @@ export class TransferController {
   static async getProof(req: Request, res: Response, next: NextFunction) {
     try {
       const { reference } = req.params;
-      const proof = await LedgerService.getTransactionProof(reference);
+      const proof = await LedgerService.getTransactionProof(reference, req.user);
 
       return res.status(200).json({
         success: true,
         data: proof,
       });
     } catch (error: any) {
-      return res.status(404).json({
+      const isAuthError = error.message.includes('Unauthorized');
+      return res.status(isAuthError ? 403 : 404).json({
         success: false,
-        error: { code: 'NOT_FOUND', message: error.message },
+        error: { code: isAuthError ? 'FORBIDDEN' : 'NOT_FOUND', message: error.message },
       });
     }
   }
 }
+

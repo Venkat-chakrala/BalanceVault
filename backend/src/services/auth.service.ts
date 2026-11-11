@@ -3,15 +3,20 @@ import jwt from 'jsonwebtoken';
 import prisma from '../prisma/client';
 import { config } from '../config/env';
 import { AuditService } from './audit.service';
-import { Role } from '../types';
 
 export interface RegisterDTO {
   email: string;
   password: string;
   fullName: string;
   phone?: string;
-  role?: Role;
   initialDepositCents?: number;
+  ipAddress?: string;
+  userAgent?: string;
+}
+
+export interface UpdateProfileDTO {
+  fullName: string;
+  phone?: string | null;
   ipAddress?: string;
   userAgent?: string;
 }
@@ -48,7 +53,8 @@ export class AuthService {
           passwordHash,
           fullName: dto.fullName.trim(),
           phone: dto.phone || null,
-          role: dto.role || 'USER',
+          // Always enforce standard USER role on public registration to prevent privilege escalation
+          role: 'USER',
           status: 'ACTIVE',
           kycStatus: 'PENDING',
         },
@@ -95,6 +101,7 @@ export class AuthService {
         id: user.user.id,
         email: user.user.email,
         fullName: user.user.fullName,
+        phone: user.user.phone,
         role: user.user.role,
         status: user.user.status,
         kycStatus: user.user.kycStatus,
@@ -108,6 +115,63 @@ export class AuthService {
       },
       token,
     };
+  }
+
+  /**
+   * Revokes the current user's active JWT session by incrementing tokenVersion.
+   */
+  static async logout(userId: string, ipAddress?: string, userAgent?: string) {
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: { tokenVersion: { increment: 1 } },
+      select: { id: true, email: true },
+    });
+
+    await AuditService.log({
+      actorId: user.id,
+      actorEmail: user.email,
+      action: 'USER_LOGOUT',
+      severity: 'INFO',
+      ipAddress,
+      userAgent,
+    });
+  }
+
+  /**
+   * Updates editable user profile details and logs the change.
+   */
+  static async updateProfile(userId: string, dto: UpdateProfileDTO) {
+    const updated = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        fullName: dto.fullName.trim(),
+        phone: dto.phone ? dto.phone.trim() : null,
+      },
+      select: {
+        id: true,
+        email: true,
+        fullName: true,
+        phone: true,
+        role: true,
+        status: true,
+        kycStatus: true,
+        kycDocumentType: true,
+        kycDocumentNumber: true,
+        createdAt: true,
+      },
+    });
+
+    await AuditService.log({
+      actorId: updated.id,
+      actorEmail: updated.email,
+      action: 'USER_PROFILE_UPDATED',
+      severity: 'INFO',
+      ipAddress: dto.ipAddress,
+      userAgent: dto.userAgent,
+      details: { fullName: updated.fullName, hasPhone: Boolean(updated.phone) },
+    });
+
+    return updated;
   }
 
   /**
@@ -172,6 +236,7 @@ export class AuthService {
         id: user.id,
         email: user.email,
         fullName: user.fullName,
+        phone: user.phone,
         role: user.role,
         status: user.status,
         kycStatus: user.kycStatus,

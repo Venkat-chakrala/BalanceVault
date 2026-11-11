@@ -13,6 +13,7 @@ export interface TransferParams {
   toAccountId: string;
   amount: number; // in cents, positive integer
   description?: string;
+  idempotencyKey?: string;
   ipAddress?: string;
   userAgent?: string;
 }
@@ -22,8 +23,34 @@ export interface DepositWithdrawParams {
   accountId: string;
   amount: number; // in cents
   description?: string;
+  idempotencyKey?: string;
   ipAddress?: string;
   userAgent?: string;
+}
+
+const IDEMPOTENCY_TTL_MS = 10 * 60 * 1000;
+const completedIdempotencyKeys = new Map<string, number>();
+const inFlightIdempotencyKeys = new Set<string>();
+
+function acquireIdempotencyLock(scopeKey?: string): string | null {
+  if (!scopeKey) return null;
+  const now = Date.now();
+  for (const [key, expiresAt] of completedIdempotencyKeys.entries()) {
+    if (expiresAt <= now) completedIdempotencyKeys.delete(key);
+  }
+  if (inFlightIdempotencyKeys.has(scopeKey) || completedIdempotencyKeys.has(scopeKey)) {
+    throw new Error('Duplicate transaction detected. This request has already been submitted.');
+  }
+  inFlightIdempotencyKeys.add(scopeKey);
+  return scopeKey;
+}
+
+function finalizeIdempotencyLock(scopeKey: string | null, committed: boolean): void {
+  if (!scopeKey) return;
+  inFlightIdempotencyKeys.delete(scopeKey);
+  if (committed) {
+    completedIdempotencyKeys.set(scopeKey, Date.now() + IDEMPOTENCY_TTL_MS);
+  }
 }
 
 export class LedgerService {
@@ -32,322 +59,385 @@ export class LedgerService {
    * and appends a cryptographically chained block to the verifiable ledger.
    */
   static async executeTransfer(params: TransferParams) {
-    const { initiatedById, fromAccountId, toAccountId, amount, description, ipAddress, userAgent } = params;
+    const {
+      initiatedById,
+      fromAccountId,
+      toAccountId,
+      amount,
+      description,
+      idempotencyKey,
+      ipAddress,
+      userAgent,
+    } = params;
 
     // 1. Strict Validation
     if (!amount || amount <= 0 || !Number.isInteger(amount)) {
       throw new Error('Transfer amount must be a positive integer in cents.');
     }
 
-    if (fromAccountId === toAccountId) {
+    const normalizedDest = toAccountId.trim();
+    const isDestAccountNumber = /^BV-\d{6}$/i.test(normalizedDest);
+    const destLookup = await prisma.account.findUnique({
+      where: isDestAccountNumber
+        ? { accountNumber: normalizedDest.toUpperCase() }
+        : { id: normalizedDest },
+    });
+
+    if (!destLookup) {
+      throw new Error('Destination account not found.');
+    }
+
+    const resolvedToAccountId = destLookup.id;
+
+    if (fromAccountId === resolvedToAccountId) {
       throw new Error('Self-transfer is not permitted. Source and destination accounts must be distinct.');
     }
 
-    // Pre-transaction authorization check to ensure security audit log persists even on rejection
-    const preCheckAccount = await prisma.account.findUnique({
-      where: { id: fromAccountId },
-      include: { user: true },
-    });
+    const lockKey = acquireIdempotencyLock(
+      idempotencyKey ? `transfer:${initiatedById}:${idempotencyKey}` : undefined
+    );
+    let committed = false;
 
-    if (preCheckAccount) {
-      const initiator = await prisma.user.findUnique({ where: { id: initiatedById } });
-      if (initiator && initiator.role !== 'ADMIN' && preCheckAccount.userId !== initiatedById) {
-        // Log outside the transaction so the audit record is NEVER lost due to rollback!
-        await AuditService.log({
-          actorId: initiatedById,
-          actorEmail: initiator.email,
-          action: 'UNAUTHORIZED_TRANSFER_ATTEMPT',
-          severity: 'SECURITY_ALERT',
-          ipAddress: ipAddress || '127.0.0.1',
-          userAgent: userAgent || 'Unknown',
-          details: {
-            reason: 'IDOR attempted: Source account does not belong to caller',
-            fromAccountId,
-            toAccountId,
-            attemptedAmount: amount,
-          },
-        });
-        throw new Error('Unauthorized: You do not own the source account.');
-      }
-    }
-
-    // 2. Atomic Database Transaction with Strict Concurrency & Ledger Balancing
-    const result = await prisma.$transaction(async (tx) => {
-      // Fetch source and destination accounts inside transaction
-      const fromAccount = await tx.account.findUnique({
+    try {
+      // Pre-transaction authorization check to ensure security audit log persists even on rejection
+      const preCheckAccount = await prisma.account.findUnique({
         where: { id: fromAccountId },
         include: { user: true },
       });
 
-      const toAccount = await tx.account.findUnique({
-        where: { id: toAccountId },
-        include: { user: true },
-      });
-
-      if (!fromAccount) {
-        throw new Error('Source account not found.');
+      if (preCheckAccount) {
+        const initiator = await prisma.user.findUnique({ where: { id: initiatedById } });
+        if (initiator && initiator.role !== 'ADMIN' && preCheckAccount.userId !== initiatedById) {
+          // Log outside the transaction so the audit record is NEVER lost due to rollback!
+          await AuditService.log({
+            actorId: initiatedById,
+            actorEmail: initiator.email,
+            action: 'UNAUTHORIZED_TRANSFER_ATTEMPT',
+            severity: 'SECURITY_ALERT',
+            ipAddress: ipAddress || '127.0.0.1',
+            userAgent: userAgent || 'Unknown',
+            details: {
+              reason: 'IDOR attempted: Source account does not belong to caller',
+              fromAccountId,
+              toAccountId: resolvedToAccountId,
+              attemptedAmount: amount,
+            },
+          });
+          throw new Error('Unauthorized: You do not own the source account.');
+        }
       }
 
-      if (!toAccount) {
-        throw new Error('Destination account not found.');
-      }
+      // 2. Atomic Database Transaction with Strict Concurrency & Ledger Balancing
+      const result = await prisma.$transaction(async (tx) => {
+        // Fetch source and destination accounts inside transaction
+        const fromAccount = await tx.account.findUnique({
+          where: { id: fromAccountId },
+          include: { user: true },
+        });
 
-      // Check account statuses
-      if (fromAccount.status !== 'ACTIVE') {
-        throw new Error(`Source account is ${fromAccount.status.toLowerCase()}. Transfers not permitted.`);
-      }
+        const toAccount = await tx.account.findUnique({
+          where: { id: resolvedToAccountId },
+          include: { user: true },
+        });
 
-      if (toAccount.status !== 'ACTIVE') {
-        throw new Error(`Destination account is ${toAccount.status.toLowerCase()}. Transfers not permitted.`);
-      }
+        if (!fromAccount) {
+          throw new Error('Source account not found.');
+        }
 
-      const initiator = await tx.user.findUnique({ where: { id: initiatedById } });
-      if (!initiator) {
-        throw new Error('Initiating user not found.');
-      }
+        if (!toAccount) {
+          throw new Error('Destination account not found.');
+        }
 
-      if (initiator.role !== 'ADMIN' && fromAccount.userId !== initiatedById) {
-        throw new Error('Unauthorized: You do not own the source account.');
-      }
+        // Check account statuses
+        if (fromAccount.status !== 'ACTIVE') {
+          throw new Error(`Source account is ${fromAccount.status.toLowerCase()}. Transfers not permitted.`);
+        }
 
-      // Balance check
-      if (fromAccount.cachedBalance < amount) {
-        throw new Error(`Insufficient funds. Available balance: $${(fromAccount.cachedBalance / 100).toFixed(2)}, Requested: $${(amount / 100).toFixed(2)}`);
-      }
+        if (toAccount.status !== 'ACTIVE') {
+          throw new Error(`Destination account is ${toAccount.status.toLowerCase()}. Transfers not permitted.`);
+        }
 
-      // Compute resulting balances
-      const newFromBalance = fromAccount.cachedBalance - amount;
-      const newToBalance = toAccount.cachedBalance + amount;
+        const initiator = await tx.user.findUnique({ where: { id: initiatedById } });
+        if (!initiator) {
+          throw new Error('Initiating user not found.');
+        }
 
-      // Update source account with optimistic concurrency version increment
-      await tx.account.update({
-        where: { id: fromAccountId, version: fromAccount.version },
-        data: {
-          cachedBalance: newFromBalance,
-          version: { increment: 1 },
-        },
-      });
+        if (initiator.role !== 'ADMIN' && fromAccount.userId !== initiatedById) {
+          throw new Error('Unauthorized: You do not own the source account.');
+        }
 
-      // Update destination account
-      await tx.account.update({
-        where: { id: toAccountId, version: toAccount.version },
-        data: {
-          cachedBalance: newToBalance,
-          version: { increment: 1 },
-        },
-      });
+        // Balance check
+        if (fromAccount.cachedBalance < amount) {
+          throw new Error(`Insufficient funds. Available balance: $${(fromAccount.cachedBalance / 100).toFixed(2)}, Requested: $${(amount / 100).toFixed(2)}`);
+        }
 
-      // Create transaction record
-      const reference = generateTransactionReference();
-      const transaction = await tx.transaction.create({
-        data: {
-          reference,
-          type: 'TRANSFER',
-          status: 'COMPLETED',
-          description: description || `Transfer of $${(amount / 100).toFixed(2)}`,
-          amount,
-          currency: fromAccount.currency,
-          initiatedById,
-          fromAccountId,
-          toAccountId,
-        },
-      });
+        // Compute resulting balances
+        const newFromBalance = fromAccount.cachedBalance - amount;
+        const newToBalance = toAccount.cachedBalance + amount;
 
-      // Double-Entry Ledger Bookkeeping:
-      // Entry 1: DEBIT source account
-      const debitEntry = await tx.ledgerEntry.create({
-        data: {
-          transactionId: transaction.id,
-          accountId: fromAccountId,
-          entryType: 'DEBIT',
-          amount,
-          balanceAfter: newFromBalance,
-        },
-      });
+        // Update source account with optimistic concurrency version increment
+        await tx.account.update({
+          where: { id: fromAccountId, version: fromAccount.version },
+          data: {
+            cachedBalance: newFromBalance,
+            version: { increment: 1 },
+          },
+        });
 
-      // Entry 2: CREDIT destination account
-      const creditEntry = await tx.ledgerEntry.create({
-        data: {
-          transactionId: transaction.id,
-          accountId: toAccountId,
-          entryType: 'CREDIT',
-          amount,
-          balanceAfter: newToBalance,
-        },
-      });
+        // Update destination account
+        await tx.account.update({
+          where: { id: resolvedToAccountId, version: toAccount.version },
+          data: {
+            cachedBalance: newToBalance,
+            version: { increment: 1 },
+          },
+        });
 
-      // Cryptographic Hash Chaining:
-      const latestBlock = await tx.ledgerBlock.findFirst({
-        orderBy: { sequenceNumber: 'desc' },
-      });
-
-      const sequenceNumber = latestBlock ? latestBlock.sequenceNumber + 1 : 1;
-      const previousHash = latestBlock ? latestBlock.hash : GENESIS_PREV_HASH;
-      const nonce = generateNonce();
-
-      const hash = calculateBlockHash({
-        sequenceNumber,
-        previousHash,
-        transactionId: transaction.id,
-        reference: transaction.reference,
-        amount,
-        fromAccountId,
-        toAccountId,
-        timestamp: transaction.createdAt,
-        nonce,
-      });
-
-      const block = await tx.ledgerBlock.create({
-        data: {
-          sequenceNumber,
-          transactionId: transaction.id,
-          previousHash,
-          hash,
-          nonce,
-        },
-      });
-
-      // Transaction audit log inside successful commit
-      await tx.auditLog.create({
-        data: {
-          actorId: initiatedById,
-          actorEmail: initiator.email,
-          action: 'TRANSFER_COMPLETED',
-          severity: 'INFO',
-          ipAddress: ipAddress || '127.0.0.1',
-          userAgent: userAgent || 'Unknown',
-          details: JSON.stringify({
+        // Create transaction record
+        const reference = generateTransactionReference();
+        const transaction = await tx.transaction.create({
+          data: {
             reference,
-            transactionId: transaction.id,
+            type: 'TRANSFER',
+            status: 'COMPLETED',
+            description: description || `Transfer of $${(amount / 100).toFixed(2)}`,
+            amount,
+            currency: fromAccount.currency,
+            initiatedById,
             fromAccountId,
-            toAccountId,
-            amountCents: amount,
-            amountFormatted: `$${(amount / 100).toFixed(2)}`,
-            blockSequence: sequenceNumber,
-            blockHash: hash,
-          }),
-        },
+            toAccountId: resolvedToAccountId,
+          },
+        });
+
+        // Double-Entry Ledger Bookkeeping:
+        // Entry 1: DEBIT source account
+        const debitEntry = await tx.ledgerEntry.create({
+          data: {
+            transactionId: transaction.id,
+            accountId: fromAccountId,
+            entryType: 'DEBIT',
+            amount,
+            balanceAfter: newFromBalance,
+          },
+        });
+
+        // Entry 2: CREDIT destination account
+        const creditEntry = await tx.ledgerEntry.create({
+          data: {
+            transactionId: transaction.id,
+            accountId: resolvedToAccountId,
+            entryType: 'CREDIT',
+            amount,
+            balanceAfter: newToBalance,
+          },
+        });
+
+        // Cryptographic Hash Chaining:
+        const latestBlock = await tx.ledgerBlock.findFirst({
+          orderBy: { sequenceNumber: 'desc' },
+        });
+
+        const sequenceNumber = latestBlock ? latestBlock.sequenceNumber + 1 : 1;
+        const previousHash = latestBlock ? latestBlock.hash : GENESIS_PREV_HASH;
+        const nonce = generateNonce();
+
+        const hash = calculateBlockHash({
+          sequenceNumber,
+          previousHash,
+          transactionId: transaction.id,
+          reference: transaction.reference,
+          amount,
+          fromAccountId,
+          toAccountId: resolvedToAccountId,
+          timestamp: transaction.createdAt,
+          nonce,
+        });
+
+        const block = await tx.ledgerBlock.create({
+          data: {
+            sequenceNumber,
+            transactionId: transaction.id,
+            previousHash,
+            hash,
+            nonce,
+          },
+        });
+
+        // Transaction audit log inside successful commit
+        await tx.auditLog.create({
+          data: {
+            actorId: initiatedById,
+            actorEmail: initiator.email,
+            action: 'TRANSFER_COMPLETED',
+            severity: 'INFO',
+            ipAddress: ipAddress || '127.0.0.1',
+            userAgent: userAgent || 'Unknown',
+            details: JSON.stringify({
+              reference,
+              transactionId: transaction.id,
+              fromAccountId,
+              toAccountId: resolvedToAccountId,
+              amountCents: amount,
+              amountFormatted: `$${(amount / 100).toFixed(2)}`,
+              blockSequence: sequenceNumber,
+              blockHash: hash,
+            }),
+          },
+        });
+
+        return {
+          transaction,
+          debitEntry,
+          creditEntry,
+          block,
+          fromBalance: newFromBalance,
+          toBalance: newToBalance,
+        };
       });
 
-      return {
-        transaction,
-        debitEntry,
-        creditEntry,
-        block,
-        fromBalance: newFromBalance,
-        toBalance: newToBalance,
-      };
-    });
-
-    return result;
+      committed = true;
+      return result;
+    } finally {
+      finalizeIdempotencyLock(lockKey, committed);
+    }
   }
 
   /**
    * Deposits funds into an account (System credit).
    */
   static async executeDeposit(params: DepositWithdrawParams) {
-    const { initiatedById, accountId, amount, description, ipAddress, userAgent } = params;
+    const { initiatedById, accountId, amount, description, idempotencyKey, ipAddress, userAgent } = params;
 
     if (!amount || amount <= 0 || !Number.isInteger(amount)) {
       throw new Error('Deposit amount must be a positive integer in cents.');
     }
 
-    return await prisma.$transaction(async (tx) => {
-      const account = await tx.account.findUnique({
-        where: { id: accountId },
-        include: { user: true },
+    const preAccount = await prisma.account.findUnique({ where: { id: accountId } });
+    const initiatorPre = await prisma.user.findUnique({ where: { id: initiatedById } });
+    if (preAccount && initiatorPre && initiatorPre.role !== 'ADMIN' && preAccount.userId !== initiatedById) {
+      await AuditService.log({
+        actorId: initiatedById,
+        actorEmail: initiatorPre.email,
+        action: 'UNAUTHORIZED_DEPOSIT_ATTEMPT',
+        severity: 'SECURITY_ALERT',
+        ipAddress: ipAddress || '127.0.0.1',
+        userAgent: userAgent || 'Unknown',
+        details: { targetAccountId: accountId, attemptedAmount: amount },
       });
+      throw new Error('Unauthorized: You do not own this account.');
+    }
 
-      if (!account) throw new Error('Account not found.');
-      if (account.status !== 'ACTIVE') throw new Error(`Account is ${account.status.toLowerCase()}.`);
+    const lockKey = acquireIdempotencyLock(
+      idempotencyKey ? `deposit:${initiatedById}:${idempotencyKey}` : undefined
+    );
+    let committed = false;
 
-      const initiator = await tx.user.findUnique({ where: { id: initiatedById } });
-      if (!initiator) throw new Error('Initiating user not found.');
+    try {
+      const result = await prisma.$transaction(async (tx) => {
+        const account = await tx.account.findUnique({
+          where: { id: accountId },
+          include: { user: true },
+        });
 
-      const newBalance = account.cachedBalance + amount;
+        if (!account) throw new Error('Account not found.');
+        if (account.status !== 'ACTIVE') throw new Error(`Account is ${account.status.toLowerCase()}.`);
 
-      await tx.account.update({
-        where: { id: accountId },
-        data: {
-          cachedBalance: newBalance,
-          version: { increment: 1 },
-        },
-      });
+        const initiator = await tx.user.findUnique({ where: { id: initiatedById } });
+        if (!initiator) throw new Error('Initiating user not found.');
+        if (initiator.role !== 'ADMIN' && account.userId !== initiatedById) {
+          throw new Error('Unauthorized: You do not own this account.');
+        }
 
-      const reference = generateTransactionReference();
-      const transaction = await tx.transaction.create({
-        data: {
-          reference,
-          type: 'DEPOSIT',
-          status: 'COMPLETED',
-          description: description || `Deposit of $${(amount / 100).toFixed(2)}`,
-          amount,
-          currency: account.currency,
-          initiatedById,
-          toAccountId: accountId,
-        },
-      });
+        const newBalance = account.cachedBalance + amount;
 
-      const creditEntry = await tx.ledgerEntry.create({
-        data: {
-          transactionId: transaction.id,
-          accountId,
-          entryType: 'CREDIT',
-          amount,
-          balanceAfter: newBalance,
-        },
-      });
+        await tx.account.update({
+          where: { id: accountId },
+          data: {
+            cachedBalance: newBalance,
+            version: { increment: 1 },
+          },
+        });
 
-      const latestBlock = await tx.ledgerBlock.findFirst({
-        orderBy: { sequenceNumber: 'desc' },
-      });
-
-      const sequenceNumber = latestBlock ? latestBlock.sequenceNumber + 1 : 1;
-      const previousHash = latestBlock ? latestBlock.hash : GENESIS_PREV_HASH;
-      const nonce = generateNonce();
-
-      const hash = calculateBlockHash({
-        sequenceNumber,
-        previousHash,
-        transactionId: transaction.id,
-        reference: transaction.reference,
-        amount,
-        fromAccountId: null,
-        toAccountId: accountId,
-        timestamp: transaction.createdAt,
-        nonce,
-      });
-
-      const block = await tx.ledgerBlock.create({
-        data: {
-          sequenceNumber,
-          transactionId: transaction.id,
-          previousHash,
-          hash,
-          nonce,
-        },
-      });
-
-      await tx.auditLog.create({
-        data: {
-          actorId: initiatedById,
-          actorEmail: initiator.email,
-          action: 'DEPOSIT_COMPLETED',
-          severity: 'INFO',
-          ipAddress: ipAddress || '127.0.0.1',
-          userAgent: userAgent || 'Unknown',
-          details: JSON.stringify({
+        const reference = generateTransactionReference();
+        const transaction = await tx.transaction.create({
+          data: {
             reference,
+            type: 'DEPOSIT',
+            status: 'COMPLETED',
+            description: description || `Deposit of $${(amount / 100).toFixed(2)}`,
+            amount,
+            currency: account.currency,
+            initiatedById,
+            toAccountId: accountId,
+          },
+        });
+
+        const creditEntry = await tx.ledgerEntry.create({
+          data: {
+            transactionId: transaction.id,
             accountId,
-            amountCents: amount,
-            newBalance,
-            blockSequence: sequenceNumber,
-          }),
-        },
+            entryType: 'CREDIT',
+            amount,
+            balanceAfter: newBalance,
+          },
+        });
+
+        const latestBlock = await tx.ledgerBlock.findFirst({
+          orderBy: { sequenceNumber: 'desc' },
+        });
+
+        const sequenceNumber = latestBlock ? latestBlock.sequenceNumber + 1 : 1;
+        const previousHash = latestBlock ? latestBlock.hash : GENESIS_PREV_HASH;
+        const nonce = generateNonce();
+
+        const hash = calculateBlockHash({
+          sequenceNumber,
+          previousHash,
+          transactionId: transaction.id,
+          reference: transaction.reference,
+          amount,
+          fromAccountId: null,
+          toAccountId: accountId,
+          timestamp: transaction.createdAt,
+          nonce,
+        });
+
+        const block = await tx.ledgerBlock.create({
+          data: {
+            sequenceNumber,
+            transactionId: transaction.id,
+            previousHash,
+            hash,
+            nonce,
+          },
+        });
+
+        await tx.auditLog.create({
+          data: {
+            actorId: initiatedById,
+            actorEmail: initiator.email,
+            action: 'DEPOSIT_COMPLETED',
+            severity: 'INFO',
+            ipAddress: ipAddress || '127.0.0.1',
+            userAgent: userAgent || 'Unknown',
+            details: JSON.stringify({
+              reference,
+              accountId,
+              amountCents: amount,
+              newBalance,
+              blockSequence: sequenceNumber,
+            }),
+          },
+        });
+
+        return { transaction, creditEntry, block, balance: newBalance };
       });
 
-      return { transaction, creditEntry, block, balance: newBalance };
-    });
+      committed = true;
+      return result;
+    } finally {
+      finalizeIdempotencyLock(lockKey, committed);
+    }
   }
 
   /**
@@ -455,7 +545,7 @@ export class LedgerService {
   /**
    * Generates a cryptographic verification receipt for a specific transaction.
    */
-  static async getTransactionProof(reference: string) {
+  static async getTransactionProof(reference: string, requester?: { id: string; role: string }) {
     const tx = await prisma.transaction.findUnique({
       where: { reference },
       include: {
@@ -466,6 +556,14 @@ export class LedgerService {
     });
 
     if (!tx) throw new Error('Transaction not found');
+
+    if (requester && requester.role === 'USER') {
+      const isParticipant =
+        tx.initiatedById === requester.id || tx.entries.some((e) => e.account.userId === requester.id);
+      if (!isParticipant) {
+        throw new Error('Unauthorized: You do not have access to this transaction proof.');
+      }
+    }
 
     const totalDebits = tx.entries
       .filter((e) => e.entryType === 'DEBIT')

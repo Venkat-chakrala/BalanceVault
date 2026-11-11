@@ -179,12 +179,13 @@ export class AdminController {
    */
   static async getAuditTrail(req: Request, res: Response, next: NextFunction) {
     try {
-      const { actorId, action, severity, limit, offset } = req.query;
+      const { actorId, action, severity, search, limit, offset } = req.query;
 
       const result = await AuditService.getLogs({
         actorId: actorId as string,
         action: action as string,
         severity: severity as string,
+        search: search as string,
         limit: limit ? parseInt(limit as string) : 50,
         offset: offset ? parseInt(offset as string) : 0,
       });
@@ -232,3 +233,4 @@ export class AdminController {
     }
   }
 }
+

@@ -39,11 +39,46 @@ export class AuthController {
         data: result,
       });
     } catch (error: any) {
-      const status = error.message.includes('suspended') ? 403 : 401;
+      const isSuspended = error.message.toLowerCase().includes('suspended');
+      const status = isSuspended ? 403 : 401;
       return res.status(status).json({
         success: false,
-        error: { code: 'AUTH_FAILED', message: error.message },
+        error: {
+          code: isSuspended ? 'ACCOUNT_SUSPENDED' : 'AUTH_FAILED',
+          message: error.message,
+        },
       });
+    }
+  }
+
+  static async logout(req: Request, res: Response, next: NextFunction) {
+    try {
+      await AuthService.logout(req.user!.id, req.ip, req.get('user-agent'));
+      return res.status(200).json({
+        success: true,
+        message: 'Logged out successfully. Active session terminated.',
+      });
+    } catch (error) {
+      return next(error);
+    }
+  }
+
+  static async updateProfile(req: Request, res: Response, next: NextFunction) {
+    try {
+      const updatedUser = await AuthService.updateProfile(req.user!.id, {
+        fullName: req.body.fullName,
+        phone: req.body.phone,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: 'Profile details updated.',
+        data: { user: updatedUser },
+      });
+    } catch (error) {
+      return next(error);
     }
   }
 
@@ -131,3 +166,4 @@ export class AuthController {
     }
   }
 }
+

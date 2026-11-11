@@ -33,7 +33,6 @@ describe('Concurrency & Anti-Double-Spend Defense Tests', () => {
 
   afterAll(async () => {
     if (testUserId) {
-      await prisma.auditLog.deleteMany({ where: { actorId: testUserId } });
       await prisma.ledgerEntry.deleteMany({ where: { accountId: sourceAccountId } });
       await prisma.transaction.deleteMany({ where: { initiatedById: testUserId } });
       await prisma.account.deleteMany({ where: { userId: testUserId } });
@@ -78,3 +77,4 @@ describe('Concurrency & Anti-Double-Spend Defense Tests', () => {
     expect(updatedSource?.cachedBalance).toBeGreaterThanOrEqual(0);
   });
 });
+

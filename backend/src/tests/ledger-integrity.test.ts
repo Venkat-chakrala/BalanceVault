@@ -1,12 +1,13 @@
 import request from 'supertest';
 import app from '../app';
-import prisma from '../prisma/client';
+import prisma, { ensureAuditImmutabilityTriggers } from '../prisma/client';
 import { LedgerService } from '../services/ledger.service';
 
 describe('Verifiable Ledger & Cryptographic Integrity Tests', () => {
   let auditorToken = '';
 
   beforeAll(async () => {
+    await ensureAuditImmutabilityTriggers();
     const auditorRes = await request(app)
       .post('/api/auth/login')
       .send({ email: 'auditor@balancevault.com', password: 'AuditorPassword@123' });
@@ -96,4 +97,33 @@ describe('Verifiable Ledger & Cryptographic Integrity Tests', () => {
     const postRestoreVerification = await LedgerService.verifyLedgerChain();
     expect(postRestoreVerification.isValid).toBe(true);
   });
+
+  it('should enforce immutable AuditLog records against updates and deletions (ORM + DB trigger)', async () => {
+    const sampleLog = await prisma.auditLog.findFirst({ orderBy: { createdAt: 'desc' } });
+    expect(sampleLog).toBeDefined();
+
+    await expect(
+      prisma.auditLog.update({
+        where: { id: sampleLog!.id },
+        data: { action: 'TAMPERED_ACTION' },
+      })
+    ).rejects.toThrow(/IMMUTABLE_AUDIT_LOG/);
+
+    await expect(
+      prisma.auditLog.delete({
+        where: { id: sampleLog!.id },
+      })
+    ).rejects.toThrow(/IMMUTABLE_AUDIT_LOG/);
+
+    await expect(
+      prisma.$executeRawUnsafe(
+        `UPDATE "AuditLog" SET "action" = 'RAW_SQL_TAMPER' WHERE "id" = '${sampleLog!.id}'`
+      )
+    ).rejects.toThrow(/IMMUTABLE_AUDIT_LOG/);
+
+    await expect(
+      prisma.$executeRawUnsafe(`DELETE FROM "AuditLog" WHERE "id" = '${sampleLog!.id}'`)
+    ).rejects.toThrow(/IMMUTABLE_AUDIT_LOG/);
+  });
 });
+

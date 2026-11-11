@@ -51,3 +51,4 @@ export function generateTransactionReference(): string {
   const randomHex = crypto.randomBytes(4).toString('hex').toUpperCase();
   return `TXN-${dateStr}-${randomHex}`;
 }
+

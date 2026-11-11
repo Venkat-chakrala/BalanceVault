@@ -104,3 +104,4 @@ This log documents the interaction between developer prompts, AI-generated propo
   3. `authMiddleware` validates both `user.status !== 'SUSPENDED'` and `user.tokenVersion === decoded.tokenVersion`.
   4. The very next HTTP request using the old token is instantly rejected with `403 ACCOUNT_SUSPENDED` (Zero Stale Session Window).
 - **Commit Reference**: `a2b1b4c` (implemented in `backend/src/controllers/admin.controller.ts`, `backend/src/middlewares/auth.middleware.ts`, and verified in `backend/src/tests/revocation.test.ts`).
+

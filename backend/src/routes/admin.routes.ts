@@ -19,3 +19,4 @@ router.get('/audit-trail', requireRole(['ADMIN', 'AUDITOR']), AdminController.ge
 router.get('/stats', requireRole(['ADMIN', 'AUDITOR']), AdminController.getSystemStats);
 
 export default router;
+

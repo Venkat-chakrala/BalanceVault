@@ -1,6 +1,10 @@
 import app from './app';
 import { config } from './config/env';
-import prisma from './prisma/client';
+import prisma, { ensureAuditImmutabilityTriggers } from './prisma/client';
+
+ensureAuditImmutabilityTriggers().catch((err) => {
+  console.error('Failed to initialize AuditLog immutability triggers:', err);
+});
 
 const server = app.listen(config.port, () => {
   console.log(`====================================================`);
@@ -22,3 +26,4 @@ const gracefulShutdown = async (signal: string) => {
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+

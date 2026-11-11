@@ -90,3 +90,4 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
     return next(error);
   }
 }
+

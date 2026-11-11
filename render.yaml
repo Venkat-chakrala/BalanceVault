@@ -16,3 +16,4 @@ services:
         value: super-secure-balancevault-production-key-9988776655
       - key: CORS_ORIGIN
         value: "*"
+

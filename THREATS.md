@@ -97,3 +97,4 @@ PASS src/tests/auth.test.ts (Authentication & Onboarding)
 
 Total: 7 Test Suites Passed, 26 Adversarial Tests Passed (100% Success)
 ```
+

@@ -171,3 +171,4 @@ export const ProofModal: React.FC<ProofModalProps> = ({ proof, onClose }) => {
     </div>
   );
 };
+

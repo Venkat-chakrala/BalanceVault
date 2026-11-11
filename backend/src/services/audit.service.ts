@@ -41,6 +41,7 @@ export class AuditService {
     actorId?: string;
     action?: string;
     severity?: string;
+    search?: string;
     limit?: number;
     offset?: number;
   }) {
@@ -51,6 +52,16 @@ export class AuditService {
     if (filters.actorId) where.actorId = filters.actorId;
     if (filters.action) where.action = { contains: filters.action };
     if (filters.severity) where.severity = filters.severity;
+    if (filters.search && filters.search.trim()) {
+      const q = filters.search.trim();
+      where.OR = [
+        { action: { contains: q } },
+        { action: { contains: q.toUpperCase() } },
+        { actorEmail: { contains: q } },
+        { actorEmail: { contains: q.toLowerCase() } },
+        { details: { contains: q } },
+      ];
+    }
 
     const [logs, total] = await Promise.all([
       prisma.auditLog.findMany({
@@ -79,3 +90,4 @@ export class AuditService {
     };
   }
 }
+

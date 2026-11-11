@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { PlusCircle, X, AlertCircle } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import { PlusCircle, X, AlertCircle, Loader2 } from 'lucide-react';
 import { ApiClient } from '../services/api';
 
 interface DepositModalProps {
@@ -9,15 +9,24 @@ interface DepositModalProps {
 }
 
 export const DepositModal: React.FC<DepositModalProps> = ({ accounts, onClose, onSuccess }) => {
-  const [accountId, setAccountId] = useState(accounts[0]?.id || '');
+  const activeAccounts = accounts.filter((a) => a.status === 'ACTIVE');
+  const selectableAccounts = activeAccounts.length > 0 ? activeAccounts : accounts;
+  const [accountId, setAccountId] = useState(selectableAccounts[0]?.id || '');
   const [amountDollars, setAmountDollars] = useState('500.00');
-  const [description, setDescription] = useState('Synthetic Wire Deposit');
+  const [description, setDescription] = useState('Wire Deposit');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const inFlightKeyRef = useRef<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return;
     setError(null);
+
+    if (!accountId) {
+      setError('Please select a target account.');
+      return;
+    }
 
     const amountFloat = parseFloat(amountDollars);
     if (isNaN(amountFloat) || amountFloat <= 0) {
@@ -26,18 +35,30 @@ export const DepositModal: React.FC<DepositModalProps> = ({ accounts, onClose, o
     }
 
     const amountCents = Math.round(amountFloat * 100);
+    if (amountCents <= 0 || amountCents > 100_000_000) {
+      setError('Deposit must be between $0.01 and $1,000,000.00.');
+      return;
+    }
+
+    const key = inFlightKeyRef.current || ApiClient.createIdempotencyKey();
+    inFlightKeyRef.current = key;
 
     try {
       setLoading(true);
       await ApiClient.deposit({
         accountId,
         amount: amountCents,
-        description,
+        description: description.trim() || undefined,
+        idempotencyKey: key,
       });
 
+      inFlightKeyRef.current = null;
       onSuccess();
       onClose();
     } catch (err: any) {
+      if (err?.code !== 'DUPLICATE_TRANSACTION') {
+        inFlightKeyRef.current = null;
+      }
       setError(err.message || 'Deposit failed');
     } finally {
       setLoading(false);
@@ -126,10 +147,11 @@ export const DepositModal: React.FC<DepositModalProps> = ({ accounts, onClose, o
             </button>
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || selectableAccounts.length === 0}
               className="px-5 py-2.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl shadow-lg shadow-emerald-900/30 transition flex items-center gap-2"
             >
-              {loading ? 'Processing...' : 'Add Funds'}
+              {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              <span>{loading ? 'Processing...' : 'Add Funds'}</span>
             </button>
           </div>
         </form>
@@ -137,3 +159,4 @@ export const DepositModal: React.FC<DepositModalProps> = ({ accounts, onClose, o
     </div>
   );
 };
+

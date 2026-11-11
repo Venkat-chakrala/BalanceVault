@@ -1,17 +1,18 @@
 import bcrypt from 'bcryptjs';
-import prisma from './client';
+import prisma, { ensureAuditImmutabilityTriggers } from './client';
 import { LedgerService } from '../services/ledger.service';
 
 async function main() {
-  console.log('🌱 Seeding BalanceVault database with verified benchmark records...');
+  console.log('🌱 Ensuring database immutability triggers and checking seed state...');
+  await ensureAuditImmutabilityTriggers();
 
-  // Clean existing records to ensure deterministic seed state
-  await prisma.auditLog.deleteMany();
-  await prisma.ledgerBlock.deleteMany();
-  await prisma.ledgerEntry.deleteMany();
-  await prisma.transaction.deleteMany();
-  await prisma.account.deleteMany();
-  await prisma.user.deleteMany();
+  const existingUsers = await prisma.user.count();
+  if (existingUsers > 0) {
+    console.log(`ℹ️ Database already contains ${existingUsers} users. Preserving existing ledger and immutable audit records.`);
+    return;
+  }
+
+  console.log('🌱 Seeding BalanceVault database with verified benchmark records...');
 
   const salt = await bcrypt.genSalt(10);
 
@@ -178,3 +179,4 @@ main()
   .finally(async () => {
     await prisma.$disconnect();
   });
+

@@ -25,7 +25,7 @@ app.use(
   cors({
     origin: '*', // Allows deployment environments and cross-origin evaluators
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
   })
 );
 

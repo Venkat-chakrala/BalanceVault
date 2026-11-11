@@ -59,6 +59,20 @@ describe('Insecure Direct Object Reference (IDOR) Defense Tests', () => {
     expect(res.body.error.message).toContain('Unauthorized');
   });
 
+  it('should block Bob from depositing into Alice account via IDOR (403 Forbidden)', async () => {
+    const res = await request(app)
+      .post('/api/transfers/deposit')
+      .set('Authorization', `Bearer ${bobToken}`)
+      .send({
+        accountId: aliceAccountId,
+        amount: 1000,
+        description: 'Unauthorized deposit test',
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.success).toBe(false);
+  });
+
   it('should verify that an unauthorized IDOR attempt was recorded in the audit trail', async () => {
     const auditRecord = await prisma.auditLog.findFirst({
       where: { action: 'UNAUTHORIZED_TRANSFER_ATTEMPT' },
@@ -69,3 +83,4 @@ describe('Insecure Direct Object Reference (IDOR) Defense Tests', () => {
     expect(auditRecord?.severity).toBe('SECURITY_ALERT');
   });
 });
+

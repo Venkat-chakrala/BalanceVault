@@ -1,23 +1,39 @@
 const API_BASE = '/api';
+const TOKEN_KEY = 'bv_token';
+
+export interface AuditTrailQuery {
+  limit?: number;
+  offset?: number;
+  severity?: string;
+  action?: string;
+  search?: string;
+}
 
 export class ApiClient {
-  private static getToken(): string | null {
-    return localStorage.getItem('bv_token');
+  static getToken(): string | null {
+    return localStorage.getItem(TOKEN_KEY);
   }
 
-  public static setToken(token: string) {
-    localStorage.setItem('bv_token', token);
+  static setToken(token: string): void {
+    localStorage.setItem(TOKEN_KEY, token);
   }
 
-  public static clearToken() {
-    localStorage.removeItem('bv_token');
+  static clearToken(): void {
+    localStorage.removeItem(TOKEN_KEY);
   }
 
-  private static async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+  static createIdempotencyKey(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `bv-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+  }
+
+  private static async request(endpoint: string, options: RequestInit = {}): Promise<any> {
     const token = this.getToken();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      ...(options.headers as Record<string, string>),
+      ...((options.headers as Record<string, string>) || {}),
     };
 
     if (token) {
@@ -29,16 +45,32 @@ export class ApiClient {
       headers,
     });
 
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      if (response.status === 401 || (response.status === 403 && data.error?.code === 'ACCOUNT_SUSPENDED')) {
-        // Handle immediate session revocation
-        if (data.error?.code === 'TOKEN_REVOKED' || data.error?.code === 'ACCOUNT_SUSPENDED') {
-          // Token is dead
+      const errorCode = data?.error?.code;
+      const isAuthRevoked =
+        (response.status === 401 && endpoint !== '/auth/login' && endpoint !== '/auth/register') ||
+        (response.status === 403 && errorCode === 'ACCOUNT_SUSPENDED' && endpoint !== '/auth/login');
+
+      if (isAuthRevoked) {
+        this.clearToken();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('bv:session-revoked', {
+              detail: {
+                code: errorCode || 'UNAUTHORIZED',
+                message: data?.error?.message || 'Your session has ended. Please sign in again.',
+              },
+            })
+          );
         }
       }
-      throw new Error(data.error?.message || 'API request failed');
+
+      const err: any = new Error(data?.error?.message || 'API request failed');
+      err.status = response.status;
+      err.code = errorCode;
+      throw err;
     }
 
     return data;
@@ -46,34 +78,55 @@ export class ApiClient {
 
   // Health
   static getHealth() {
-    return this.request<{ status: string; uptime: number; service: string }>('/health');
+    return this.request('/health');
   }
 
   static getReady() {
-    return this.request<{ status: string; checks: { database: string; ledgerService: string } }>('/ready');
+    return this.request('/ready');
   }
 
-  // Auth
+  // Auth & Profile
   static login(credentials: { email: string; password: string }) {
-    return this.request<{ success: boolean; data: any }>('/auth/login', {
+    return this.request('/auth/login', {
       method: 'POST',
       body: JSON.stringify(credentials),
     });
   }
 
-  static register(payload: { email: string; password: string; fullName: string; initialDepositCents?: number }) {
-    return this.request<{ success: boolean; data: any }>('/auth/register', {
+  static register(payload: {
+    email: string;
+    password: string;
+    fullName: string;
+    phone?: string;
+    initialDepositCents?: number;
+  }) {
+    return this.request('/auth/register', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
   }
 
+  static async logout() {
+    try {
+      return await this.request('/auth/logout', { method: 'POST' });
+    } finally {
+      this.clearToken();
+    }
+  }
+
   static getMe() {
-    return this.request<{ success: boolean; data: any }>('/auth/me');
+    return this.request('/auth/me');
+  }
+
+  static updateProfile(payload: { fullName: string; phone?: string | null }) {
+    return this.request('/auth/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
   }
 
   static submitKyc(payload: { documentType: string; documentNumber: string }) {
-    return this.request<{ success: boolean; data: any }>('/auth/kyc/submit', {
+    return this.request('/auth/kyc/submit', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
@@ -81,53 +134,98 @@ export class ApiClient {
 
   // Accounts
   static getMyAccounts() {
-    return this.request<{ success: boolean; data: any[] }>('/accounts/my');
+    return this.request('/accounts/my');
   }
 
-  static getAccountTransactions(accountId: string) {
-    return this.request<{ success: boolean; data: any[] }>(`/accounts/${accountId}/transactions`);
-  }
-
-  // Transfers & Ledger
-  static transfer(payload: { fromAccountId: string; toAccountId: string; amount: number; description?: string }) {
-    return this.request<{ success: boolean; message: string; data: any }>('/transfers', {
+  static createAccount(type: 'CHECKING' | 'SAVINGS') {
+    return this.request('/accounts/open', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ type }),
     });
   }
 
-  static deposit(payload: { accountId: string; amount: number; description?: string }) {
-    return this.request<{ success: boolean; message: string; data: any }>('/transfers/deposit', {
+  static getAccountTransactions(accountId: string) {
+    return this.request(`/accounts/${accountId}/transactions`);
+  }
+
+  // Transfers & Proof
+  static transfer(payload: {
+    fromAccountId: string;
+    toAccountId: string;
+    amount: number;
+    description?: string;
+    idempotencyKey?: string;
+  }) {
+    const key = payload.idempotencyKey || this.createIdempotencyKey();
+    return this.request('/transfers', {
       method: 'POST',
-      body: JSON.stringify(payload),
+      headers: { 'Idempotency-Key': key },
+      body: JSON.stringify({
+        fromAccountId: payload.fromAccountId,
+        toAccountId: payload.toAccountId,
+        amount: payload.amount,
+        description: payload.description,
+        idempotencyKey: key,
+      }),
+    });
+  }
+
+  static deposit(payload: {
+    accountId: string;
+    amount: number;
+    description?: string;
+    idempotencyKey?: string;
+  }) {
+    const key = payload.idempotencyKey || this.createIdempotencyKey();
+    return this.request('/transfers/deposit', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': key },
+      body: JSON.stringify({
+        accountId: payload.accountId,
+        amount: payload.amount,
+        description: payload.description,
+        idempotencyKey: key,
+      }),
     });
   }
 
   static getProof(reference: string) {
-    return this.request<{ success: boolean; data: any }>(`/transfers/proof/${reference}`);
+    return this.request(`/transfers/proof/${reference}`);
   }
 
   // Admin & Auditor
-  static getUsers(page: number = 1) {
-    return this.request<{ success: boolean; data: { users: any[]; total: number } }>(`/admin/users?page=${page}`);
+  static getUsers() {
+    return this.request('/admin/users');
   }
 
-  static updateUser(id: string, payload: { status?: string; role?: string; kycStatus?: string }) {
-    return this.request<{ success: boolean; data: any }>(`/admin/users/${id}`, {
+  static updateUser(
+    id: string,
+    payload: { status?: string; role?: string; kycStatus?: string }
+  ) {
+    return this.request(`/admin/users/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     });
   }
 
   static verifyLedger() {
-    return this.request<{ success: boolean; data: any }>('/admin/ledger/verify');
+    return this.request('/admin/ledger/verify');
   }
 
-  static getAuditTrail(limit: number = 50) {
-    return this.request<{ success: boolean; data: { logs: any[]; total: number } }>(`/admin/audit-trail?limit=${limit}`);
+  static getAuditTrail(limitOrQuery: number | AuditTrailQuery = 50) {
+    const query: AuditTrailQuery =
+      typeof limitOrQuery === 'number' ? { limit: limitOrQuery } : limitOrQuery;
+    const params = new URLSearchParams();
+    if (query.limit) params.set('limit', String(query.limit));
+    if (query.offset) params.set('offset', String(query.offset));
+    if (query.severity) params.set('severity', query.severity);
+    if (query.action) params.set('action', query.action);
+    if (query.search) params.set('search', query.search);
+    const qs = params.toString();
+    return this.request(`/admin/audit-trail${qs ? `?${qs}` : ''}`);
   }
 
   static getStats() {
-    return this.request<{ success: boolean; data: any }>('/admin/stats');
+    return this.request('/admin/stats');
   }
 }

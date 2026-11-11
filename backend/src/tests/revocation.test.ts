@@ -28,7 +28,6 @@ describe('Immediate Session Revocation Defense Tests', () => {
 
   afterAll(async () => {
     if (victimId) {
-      await prisma.auditLog.deleteMany({ where: { actorId: victimId } });
       await prisma.account.deleteMany({ where: { userId: victimId } });
       await prisma.user.delete({ where: { id: victimId } });
     }
@@ -62,3 +61,4 @@ describe('Immediate Session Revocation Defense Tests', () => {
     expect(postSuspensionRes.body.error.code).toBe('ACCOUNT_SUSPENDED');
   });
 });
+
